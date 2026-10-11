@@ -1,6 +1,6 @@
 Package: dev.hazel.changeendpointvoice
 Name: ChangeEndpoint Voice
-Version: 0.5.1
+Version: 0.5.7
 Architecture: iphoneos-arm64
 Description: Voice engine for the ChangeEndpoint Rain plugin on Spacebar servers
 Maintainer: hazel

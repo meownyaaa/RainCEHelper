@@ -6,9 +6,9 @@ INSTALL_TARGET_PROCESSES = Discord
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = ChangeEndpointVoice
-ChangeEndpointVoice_FILES = Bridge.mm Voice.mm Video.mm Broadcast.mm Frames.mm
+ChangeEndpointVoice_FILES = Bridge.mm Voice.mm Video.mm Broadcast.mm Frames.mm Media.mm RangeLoader.mm
 ChangeEndpointVoice_CFLAGS = -fobjc-arc
-ChangeEndpointVoice_FRAMEWORKS = Foundation AVFoundation UIKit Security CoreMedia CoreVideo VideoToolbox QuartzCore
+ChangeEndpointVoice_FRAMEWORKS = Foundation AVFoundation UIKit Security CoreMedia CoreVideo VideoToolbox QuartzCore UniformTypeIdentifiers
 ChangeEndpointVoice_LDFLAGS = -Wl,-no_warn_inits
 
 include $(THEOS_MAKE_PATH)/tweak.mk
