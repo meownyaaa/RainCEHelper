@@ -48,9 +48,32 @@ static TaskWithRequestHandler originalTaskWithRequestHandler;
 static NSUInteger loggedRequests;
 
 // Discord's video loader (the ll-https scheme) fetches the real link itself, so the agent has to go on that request
+static NSString *attachmentIdOf(NSURL *url) {
+    NSArray<NSString *> *parts = url.pathComponents;
+    NSUInteger at = [parts indexOfObject:@"attachments"];
+    return at != NSNotFound && parts.count > at + 2 ? parts[at + 2] : nil;
+}
+
+// Discord asks the cdn for a thumbnail of the video, a frame saved from the download answers it instead
+static NSURLRequest *withThumbnail(NSURLRequest *request) {
+    NSURL *url = request.URL;
+    NSString *extension = url.pathExtension.lowercaseString;
+    if (![@[ @"mp4", @"mov", @"m4v", @"webm" ] containsObject:extension]) return nil;
+    // Discord tacks "?format=webp" onto a url that already has a query, so it isn't a separate parameter
+    if (![url.absoluteString containsString:@"format="]) return nil;
+    NSString *attachmentId = attachmentIdOf(url);
+    NSString *path = attachmentId ? CEThumbnailPath(attachmentId) : nil;
+    if (!path || ![NSFileManager.defaultManager fileExistsAtPath:path]) return nil;
+    NSMutableURLRequest *local = [request mutableCopy];
+    local.URL = [NSURL fileURLWithPath:path];
+    return local;
+}
+
 static NSURLRequest *withAppAgent(NSURLSession *session, NSURLRequest *request) {
     NSURL *url = request.URL;
     if (!url || url.isFileURL || !isSigned(url)) return request;
+    NSURLRequest *thumbnail = withThumbnail(request);
+    if (thumbnail) return thumbnail;
     NSString *current = [request valueForHTTPHeaderField:@"User-Agent"] ?: session.configuration.HTTPAdditionalHeaders[@"User-Agent"];
     if (loggedRequests++ < 12)
         CEVoiceEmit(@"", @"media", [NSString stringWithFormat:@"request %@ agent %@ range %@", [url.path lastPathComponent], current ?: @"(default)", [request valueForHTTPHeaderField:@"Range"] ?: @"-"]);
@@ -72,6 +95,17 @@ static id taskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
 
 static id taskWithRequestHandler(id self, SEL _cmd, NSURLRequest *request, id handler) {
     return originalTaskWithRequestHandler(self, _cmd, withAppAgent(self, request), handler);
+}
+
+void CEMediaPrefetch(NSString *raw, double size) {
+    NSURL *url = [NSURL URLWithString:raw];
+    NSString *attachmentId = url ? attachmentIdOf(url) : nil;
+    // 15 MB keeps background downloads light
+    if (!attachmentId || !isSigned(url) || size <= 0 || size > 15 * 1024 * 1024) return;
+    if ([NSFileManager.defaultManager fileExistsAtPath:CEThumbnailPath(attachmentId)]) return;
+    CERangeLoaderPrefetch(url, ^{
+        return currentAgent();
+    });
 }
 
 // loads a url the way the player would, to check what actually goes out

@@ -1,9 +1,11 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
+#import "RangeLoader.h"
 #import "Video.h"
 
 void CEMediaProbe(NSString *raw);
+void CEMediaPrefetch(NSString *raw, double size);
 #import "Voice.h"
 
 typedef void (^Resolve)(id result);
@@ -74,6 +76,8 @@ static void handle(NSString *method, NSArray *args, CEDone done) {
     if ([method isEqualToString:@"debug.describe"]) return done(describeClass(string(args, 0) ?: @""), nil);
     if ([method isEqualToString:@"debug.classes"]) return done(classesMatching(string(args, 0) ?: @""), nil);
     if ([method isEqualToString:@"debug.asset"]) return CEMediaProbe(string(args, 0) ?: @""), done(nil, nil);
+    if ([method isEqualToString:@"media.sizes"]) return done(CEMediaSizesDrain(), nil);
+    if ([method isEqualToString:@"media.prefetch"]) return CEMediaPrefetch(string(args, 0) ?: @"", [number(args, 1) doubleValue]), done(nil, nil);
     if ([method isEqualToString:@"voice.setOutputVolume"]) {
         outputVolume = [number(args, 0) doubleValue] / 100.0;
         for (CEVoiceSession *session in sessions.allValues) [session setOutputVolume:outputVolume];

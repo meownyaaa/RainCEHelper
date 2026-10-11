@@ -1,6 +1,7 @@
 #import "RangeLoader.h"
 
 #import <AVFoundation/AVFoundation.h>
+#import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
 
@@ -31,9 +32,72 @@
 @property(nonatomic, strong) NSMutableDictionary<NSString *, CERangeDownload *> *downloads;
 @property(nonatomic, strong) NSMapTable<NSURLSessionTask *, CERangeDownload *> *byTask;
 @property(nonatomic, copy) NSString * (^agent)(void);
+@property(nonatomic, strong) NSMutableArray<NSURL *> *prefetchQueue;
+@property(nonatomic, strong) CERangeDownload *prefetching;
 @end
 
 static const void *kOwnedLoader = &kOwnedLoader;
+
+static NSMutableArray *measured;
+
+NSArray *CEMediaSizesDrain(void) {
+    @synchronized(CERangeDownload.class) {
+        NSArray *out = measured ?: @[];
+        measured = nil;
+        return out;
+    }
+}
+
+// spacebar doesn't send video sizes, so the finished download is measured for the js side to remember
+NSString *CEThumbnailPath(NSString *attachmentId) {
+    static NSString *dir;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dir = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject stringByAppendingPathComponent:@"changeendpoint-thumbs"];
+        [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    });
+    return [dir stringByAppendingPathComponent:[attachmentId stringByAppendingPathExtension:@"jpg"]];
+}
+
+// spacebar can't make video thumbnails, so a frame from the download stands in for Discord's preview
+static void writeThumbnail(AVURLAsset *local, NSString *attachmentId) {
+    AVAssetImageGenerator *generator = [AVAssetImageGenerator assetImageGeneratorWithAsset:local];
+    generator.appliesPreferredTrackTransform = YES;
+    generator.maximumSize = CGSizeMake(640, 640);
+    NSError *error = nil;
+    CGImageRef frame = [generator copyCGImageAtTime:CMTimeMakeWithSeconds(0.1, 600) actualTime:NULL error:&error];
+    if (!frame) return;
+    NSURL *target = [NSURL fileURLWithPath:CEThumbnailPath(attachmentId)];
+    CGImageDestinationRef destination = CGImageDestinationCreateWithURL((__bridge CFURLRef)target, CFSTR("public.jpeg"), 1, NULL);
+    if (destination) {
+        CGImageDestinationAddImage(destination, frame, (__bridge CFDictionaryRef) @{(id)kCGImageDestinationLossyCompressionQuality : @0.8});
+        CGImageDestinationFinalize(destination);
+        CFRelease(destination);
+    }
+    CGImageRelease(frame);
+}
+
+static void measure(CERangeDownload *download) {
+    NSArray<NSString *> *parts = download.remote.pathComponents;
+    NSUInteger at = [parts indexOfObject:@"attachments"];
+    if (at == NSNotFound || parts.count < at + 3) return;
+    NSString *channelId = parts[at + 1], *attachmentId = parts[at + 2];
+    AVURLAsset *local = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:download.path] options:nil];
+    [local loadValuesAsynchronouslyForKeys:@[ @"tracks" ]
+                         completionHandler:^{
+                             AVAssetTrack *track = [local tracksWithMediaType:AVMediaTypeVideo].firstObject;
+                             if (!track) return;
+                             CGSize size = CGSizeApplyAffineTransform(track.naturalSize, track.preferredTransform);
+                             NSInteger width = (NSInteger)llround(fabs(size.width)), height = (NSInteger)llround(fabs(size.height));
+                             if (!width || !height) return;
+                             @synchronized(CERangeDownload.class) {
+                                 if (!measured) measured = [NSMutableArray new];
+                                 [measured addObject:@[ channelId, attachmentId, @(width), @(height) ]];
+                             }
+                             writeThumbnail(local, attachmentId);
+                             CEVoiceEmit(@"", @"media", [NSString stringWithFormat:@"measured %@ %ldx%ld", attachmentId, (long)width, (long)height]);
+                         }];
+}
 
 @implementation CERangeLoader
 
@@ -132,6 +196,33 @@ static NSURL *remoteURL(NSURL *url) {
     }
 }
 
+// one background download at a time, the phone shouldn't have to work through a whole channel at once
+- (void)prefetch:(NSURL *)url {
+    dispatch_async(self.queue, ^{
+        if (self.downloads[url.path]) return;
+        for (NSURL *queued in self.prefetchQueue)
+            if ([queued.path isEqualToString:url.path]) return;
+        if (!self.prefetchQueue) self.prefetchQueue = [NSMutableArray new];
+        [self.prefetchQueue addObject:url];
+        [self pump];
+    });
+}
+
+- (void)pump {
+    if (self.prefetching || !self.prefetchQueue.count) return;
+    // the link only works with Discord's agent, which is learned from its first image request
+    if (!(self.agent ? self.agent() : nil)) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), self.queue, ^{
+            [self pump];
+        });
+        return;
+    }
+    NSURL *next = self.prefetchQueue.firstObject;
+    [self.prefetchQueue removeObjectAtIndex:0];
+    if (self.downloads[next.path]) return [self pump];
+    self.prefetching = [self downloadFor:next];
+}
+
 #pragma mark AVAssetResourceLoaderDelegate
 
 - (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)loadingRequest {
@@ -177,6 +268,11 @@ static NSURL *remoteURL(NSURL *url) {
     if (download.expected <= 0) download.expected = download.received;
     CEVoiceEmit(@"", @"media", [NSString stringWithFormat:@"range done %lld bytes %@", download.received, error.localizedDescription ?: @""]);
     [self serve:download];
+    if (!error) measure(download);
+    if (download == self.prefetching) {
+        self.prefetching = nil;
+        [self pump];
+    }
 }
 
 @end
@@ -205,6 +301,12 @@ void CERangeLoaderAttach(AVURLAsset *asset, NSString * (^agent)(void)) {
     loader.agent = agent;
     objc_setAssociatedObject(asset.resourceLoader, kOwnedLoader, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     originalSetDelegate(asset.resourceLoader, @selector(setDelegate:queue:), loader, loader.queue);
+}
+
+void CERangeLoaderPrefetch(NSURL *url, NSString * (^agent)(void)) {
+    CERangeLoader *loader = CERangeLoader.shared;
+    loader.agent = agent;
+    [loader prefetch:url];
 }
 
 void CERangeLoaderInstall(void) {
