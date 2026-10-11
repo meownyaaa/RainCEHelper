@@ -1,15 +1,26 @@
 #import "Voice.h"
 #import "RTC.h"
+#import "Video.h"
 
 static NSMutableArray *events;
 
-void CEVoiceEmit(NSString *type, NSString *value) {
-    NSLog(@"[ChangeEndpoint] voice %@: %@", type, value);
+void CEVoiceEmit(NSString *sessionId, NSString *type, NSString *value) {
+    NSLog(@"[ChangeEndpoint] voice %@ %@: %@", sessionId, type, value);
     @synchronized(CEVoiceSession.class) {
         if (!events) events = [NSMutableArray new];
         if (events.count > 200) [events removeObjectAtIndex:0];
-        [events addObject:@[ type, value ?: @"" ]];
+        [events addObject:@[ sessionId ?: @"", type, value ?: @"" ]];
     }
+}
+
+// one factory and so one audio device for every session, a second one would fight over the mic
+static CERTCPeerConnectionFactory *sharedFactory(void) {
+    static CERTCPeerConnectionFactory *factory;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        factory = [[CERTC(@"PeerConnectionFactory") alloc] init];
+    });
+    return factory;
 }
 
 NSArray *CEVoiceDrainEvents(void) {
@@ -31,13 +42,14 @@ static NSString *connectionState(NSInteger s) {
 }
 
 @interface CEVoiceSession ()
-@property(nonatomic, strong) CERTCPeerConnectionFactory *factory;
+@property(nonatomic, readwrite) NSString *sessionId;
 @property(nonatomic, strong) CERTCAudioSource *audioSource;
 @property(nonatomic, strong) CERTCAudioTrack *audioTrack;
 @property(nonatomic, strong) CERTCPeerConnection *pc;
 @property(nonatomic, strong) dispatch_semaphore_t gathered;
 @property(nonatomic, assign) double gain;
 @property(nonatomic, assign) BOOL deaf;
+@property(nonatomic, strong) NSMutableSet<NSString *> *streamIds;
 @end
 
 @implementation CEVoiceSession
@@ -46,27 +58,37 @@ static NSString *connectionState(NSInteger s) {
     return CERTC(@"PeerConnectionFactory") != nil;
 }
 
-- (instancetype)init {
+- (instancetype)initWithId:(NSString *)sessionId sendAudio:(BOOL)sendAudio receiveVideo:(BOOL)receiveVideo {
     if (!(self = [super init])) return nil;
+    _sessionId = sessionId;
+    _streamIds = [NSMutableSet new];
     _gain = 1.0;
     _gathered = dispatch_semaphore_create(0);
 
-    _factory = [[CERTC(@"PeerConnectionFactory") alloc] init];
+    CERTCPeerConnectionFactory *factory = sharedFactory();
     CERTCMediaConstraints *none = [[CERTC(@"MediaConstraints") alloc] initWithMandatoryConstraints:@{} optionalConstraints:@{}];
-    _audioSource = [_factory audioSourceWithConstraints:none];
-    _audioTrack = [_factory audioTrackWithSource:_audioSource trackId:@"audio"];
+    _audioSource = [factory audioSourceWithConstraints:none];
+    _audioTrack = [factory audioTrackWithSource:_audioSource trackId:[@"audio-" stringByAppendingString:sessionId]];
+    // stream viewing keeps the same m-line layout but never sends the mic
+    _audioTrack.isEnabled = sendAudio;
 
     CERTCConfiguration *config = [[CERTC(@"Configuration") alloc] init];
     config.iceServers = @[];
     config.sdpSemantics = CERTCSdpSemanticsUnifiedPlan;
     config.bundlePolicy = CERTCBundlePolicyMaxBundle;
     config.rtcpMuxPolicy = CERTCRtcpMuxPolicyRequire;
-    _pc = [_factory peerConnectionWithConfiguration:config constraints:none delegate:self];
+    _pc = [factory peerConnectionWithConfiguration:config constraints:none delegate:self];
     if (!_pc) return nil;
 
     CERTCRtpTransceiverInit *sendRecv = [[CERTC(@"RtpTransceiverInit") alloc] init];
     sendRecv.direction = CERTCRtpTransceiverDirectionSendRecv;
     [_pc addTransceiverWithTrack:_audioTrack init:sendRecv];
+    // watching a stream needs a video m-line from the start, it also gives op 1 the real video payload types
+    if (receiveVideo) {
+        CERTCRtpTransceiverInit *recvOnly = [[CERTC(@"RtpTransceiverInit") alloc] init];
+        recvOnly.direction = CERTCRtpTransceiverDirectionRecvOnly;
+        [_pc addTransceiverOfType:CERTCRtpMediaTypeVideo init:recvOnly];
+    }
     return self;
 }
 
@@ -92,12 +114,53 @@ static NSString *connectionState(NSInteger s) {
                }];
 }
 
+// bundled sections reuse the first transport, so a renegotiation never gathers again and shouldn't wait for it
+- (void)renegotiate:(CEDone)done {
+    // starts at 0, libdispatch traps when a semaphore is freed below its initial value
+    dispatch_semaphore_t gathered = dispatch_semaphore_create(0);
+    dispatch_semaphore_signal(gathered);
+    self.gathered = gathered;
+    [self offer:done];
+}
+
 - (void)addAudioReceiver:(CEDone)done {
     CERTCRtpTransceiverInit *recvOnly = [[CERTC(@"RtpTransceiverInit") alloc] init];
     recvOnly.direction = CERTCRtpTransceiverDirectionRecvOnly;
     [self.pc addTransceiverOfType:CERTCRtpMediaTypeAudio init:recvOnly];
-    self.gathered = dispatch_semaphore_create(0);
-    [self offer:done];
+    [self renegotiate:done];
+}
+
+- (void)addVideoReceiver:(CEDone)done {
+    CERTCRtpTransceiverInit *recvOnly = [[CERTC(@"RtpTransceiverInit") alloc] init];
+    recvOnly.direction = CERTCRtpTransceiverDirectionRecvOnly;
+    [self.pc addTransceiverOfType:CERTCRtpMediaTypeVideo init:recvOnly];
+    [self renegotiate:done];
+}
+
+- (void)stats:(CEDone)done {
+    [self.pc statisticsWithCompletionHandler:^(CERTCStatisticsReport *report) {
+        NSMutableArray *out = [NSMutableArray new];
+        NSSet *wanted = [NSSet setWithArray:@[ @"inbound-rtp", @"codec", @"transport", @"candidate-pair" ]];
+        for (CERTCStatistics *stat in report.statistics.allValues) {
+            if (![wanted containsObject:stat.type]) continue;
+            NSMutableDictionary *values = [stat.values mutableCopy];
+            values[@"type"] = stat.type;
+            [out addObject:values];
+        }
+        done(out, nil);
+    }];
+}
+
+- (BOOL)attachVideoMid:(NSString *)mid streamId:(NSString *)streamId {
+    for (CERTCRtpTransceiver *transceiver in self.pc.transceivers) {
+        if (![transceiver.mid isEqualToString:mid]) continue;
+        CERTCMediaStreamTrack *track = transceiver.receiver.track;
+        if (![track.kind isEqualToString:@"video"]) return NO;
+        [self.streamIds addObject:streamId];
+        CEVideoAttach(streamId, track);
+        return YES;
+    }
+    return NO;
 }
 
 - (void)answer:(NSString *)sdp done:(CEDone)done {
@@ -133,11 +196,12 @@ static NSString *connectionState(NSInteger s) {
 }
 
 - (void)close {
+    for (NSString *streamId in self.streamIds) CEVideoDetach(streamId);
+    [self.streamIds removeAllObjects];
     [self.pc close];
     self.pc = nil;
     self.audioTrack = nil;
     self.audioSource = nil;
-    self.factory = nil;
 }
 
 #pragma mark - DiscordRTCPeerConnectionDelegate
@@ -151,7 +215,7 @@ static NSString *connectionState(NSInteger s) {
 - (void)peerConnectionShouldNegotiate:(id)pc {
 }
 - (void)peerConnection:(id)pc didChangeIceConnectionState:(NSInteger)state {
-    CEVoiceEmit(@"ice", iceState(state));
+    CEVoiceEmit(self.sessionId, @"ice", iceState(state));
 }
 - (void)peerConnection:(id)pc didChangeIceGatheringState:(NSInteger)state {
     if (state == CERTCIceGatheringStateComplete) dispatch_semaphore_signal(self.gathered);
@@ -163,11 +227,11 @@ static NSString *connectionState(NSInteger s) {
 - (void)peerConnection:(id)pc didOpenDataChannel:(id)dataChannel {
 }
 - (void)peerConnection:(id)pc didChangeConnectionState:(NSInteger)state {
-    CEVoiceEmit(@"connection", connectionState(state));
+    CEVoiceEmit(self.sessionId, @"connection", connectionState(state));
 }
 - (void)peerConnection:(id)pc didAddReceiver:(CERTCRtpReceiver *)receiver streams:(NSArray *)streams {
     [self applyPlayout];
-    CEVoiceEmit(@"track", receiver.track.kind ?: @"");
+    CEVoiceEmit(self.sessionId, @"track", receiver.track.kind ?: @"");
 }
 
 @end

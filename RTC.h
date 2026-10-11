@@ -49,6 +49,11 @@ typedef NS_ENUM(NSInteger, CERTCIceGatheringState) { CERTCIceGatheringStateNew =
 @property(nonatomic, readonly) CERTCAudioSource *source;
 @end
 
+@interface CERTCVideoTrack : CERTCMediaStreamTrack
+- (void)addRenderer:(id)renderer;
+- (void)removeRenderer:(id)renderer;
+@end
+
 @interface CERTCRtpReceiver : NSObject
 @property(nonatomic, readonly) CERTCMediaStreamTrack *track;
 @end
@@ -59,11 +64,23 @@ typedef NS_ENUM(NSInteger, CERTCIceGatheringState) { CERTCIceGatheringStateNew =
 
 @interface CERTCRtpTransceiver : NSObject
 @property(nonatomic, readonly) CERTCRtpReceiver *receiver;
+@property(nonatomic, readonly) NSString *mid;
+@end
+
+@interface CERTCStatistics : NSObject
+@property(nonatomic, readonly) NSString *type;
+@property(nonatomic, readonly) NSDictionary<NSString *, NSObject *> *values;
+@end
+
+@interface CERTCStatisticsReport : NSObject
+@property(nonatomic, readonly) NSDictionary<NSString *, CERTCStatistics *> *statistics;
 @end
 
 @interface CERTCPeerConnection : NSObject
 @property(nonatomic, readonly) CERTCSessionDescription *localDescription;
+- (void)statisticsWithCompletionHandler:(void (^)(CERTCStatisticsReport *report))completionHandler;
 @property(nonatomic, readonly) NSArray<CERTCRtpReceiver *> *receivers;
+@property(nonatomic, readonly) NSArray<CERTCRtpTransceiver *> *transceivers;
 - (CERTCRtpTransceiver *)addTransceiverWithTrack:(CERTCMediaStreamTrack *)track init:(CERTCRtpTransceiverInit *)init;
 - (CERTCRtpTransceiver *)addTransceiverOfType:(CERTCRtpMediaType)mediaType init:(CERTCRtpTransceiverInit *)init;
 - (void)offerForConstraints:(CERTCMediaConstraints *)constraints
