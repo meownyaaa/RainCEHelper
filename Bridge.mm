@@ -52,12 +52,25 @@ static NSDictionary *describeClass(NSString *name) {
 }
 
 
+static NSArray *classesMatching(NSString *pattern) {
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    NSMutableArray *out = [NSMutableArray new];
+    for (unsigned int i = 0; i < count && out.count < 300; i++) {
+        NSString *name = NSStringFromClass(classes[i]);
+        if ([name rangeOfString:pattern options:NSCaseInsensitiveSearch].location != NSNotFound) [out addObject:name];
+    }
+    free(classes);
+    return out;
+}
+
 static void handle(NSString *method, NSArray *args, CEDone done) {
     if (!sessions) sessions = [NSMutableDictionary new];
     if ([method isEqualToString:@"ping"])
         return done(@{@"pong" : @YES, @"rtc" : @([CEVoiceSession available])}, nil);
     if ([method isEqualToString:@"events"]) return done(CEVoiceDrainEvents(), nil);
     if ([method isEqualToString:@"debug.describe"]) return done(describeClass(string(args, 0) ?: @""), nil);
+    if ([method isEqualToString:@"debug.classes"]) return done(classesMatching(string(args, 0) ?: @""), nil);
     if ([method isEqualToString:@"voice.setOutputVolume"]) {
         outputVolume = [number(args, 0) doubleValue] / 100.0;
         for (CEVoiceSession *session in sessions.allValues) [session setOutputVolume:outputVolume];
@@ -71,7 +84,8 @@ static void handle(NSString *method, NSArray *args, CEDone done) {
         [sessions[sessionId] close];
         CEVoiceSession *session = [[CEVoiceSession alloc] initWithId:sessionId
                                                            sendAudio:[number(args, 1) ?: @YES boolValue]
-                                                        receiveVideo:[number(args, 2) boolValue]];
+                                                        receiveVideo:[number(args, 2) boolValue]
+                                                          sendScreen:[number(args, 3) boolValue]];
         if (!session) return done(nil, @"Couldn't create a PeerConnection");
         sessions[sessionId] = session;
         [session setOutputVolume:outputVolume];

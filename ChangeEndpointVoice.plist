@@ -1,1 +1,1 @@
-{ Filter = { Bundles = ( "com.hammerandchisel.discord" ); }; }
+{ Filter = { Bundles = ( "com.hammerandchisel.discord", "com.hammerandchisel.discord.BroadcastUpload" ); }; }

@@ -5,7 +5,7 @@ typedef void (^CEDone)(id result, NSString *error);
 @interface CEVoiceSession : NSObject
 @property(nonatomic, readonly) NSString *sessionId;
 + (BOOL)available;
-- (instancetype)initWithId:(NSString *)sessionId sendAudio:(BOOL)sendAudio receiveVideo:(BOOL)receiveVideo;
+- (instancetype)initWithId:(NSString *)sessionId sendAudio:(BOOL)sendAudio receiveVideo:(BOOL)receiveVideo sendScreen:(BOOL)sendScreen;
 - (void)offer:(CEDone)done;
 - (void)addAudioReceiver:(CEDone)done;
 - (void)addVideoReceiver:(CEDone)done;

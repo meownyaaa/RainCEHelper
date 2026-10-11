@@ -1,5 +1,6 @@
 #import "Voice.h"
 #import "RTC.h"
+#import "Frames.h"
 #import "Video.h"
 
 static NSMutableArray *events;
@@ -50,6 +51,8 @@ static NSString *connectionState(NSInteger s) {
 @property(nonatomic, assign) double gain;
 @property(nonatomic, assign) BOOL deaf;
 @property(nonatomic, strong) NSMutableSet<NSString *> *streamIds;
+@property(nonatomic, strong) CERTCVideoSource *screenSource;
+@property(nonatomic, strong) CERTCVideoTrack *screenTrack;
 @end
 
 @implementation CEVoiceSession
@@ -58,7 +61,7 @@ static NSString *connectionState(NSInteger s) {
     return CERTC(@"PeerConnectionFactory") != nil;
 }
 
-- (instancetype)initWithId:(NSString *)sessionId sendAudio:(BOOL)sendAudio receiveVideo:(BOOL)receiveVideo {
+- (instancetype)initWithId:(NSString *)sessionId sendAudio:(BOOL)sendAudio receiveVideo:(BOOL)receiveVideo sendScreen:(BOOL)sendScreen {
     if (!(self = [super init])) return nil;
     _sessionId = sessionId;
     _streamIds = [NSMutableSet new];
@@ -88,6 +91,20 @@ static NSString *connectionState(NSInteger s) {
         CERTCRtpTransceiverInit *recvOnly = [[CERTC(@"RtpTransceiverInit") alloc] init];
         recvOnly.direction = CERTCRtpTransceiverDirectionRecvOnly;
         [_pc addTransceiverOfType:CERTCRtpMediaTypeVideo init:recvOnly];
+    }
+    // our own go live, fed with the frames the broadcast extension forwards
+    if (sendScreen) {
+        _screenSource = [factory videoSourceForScreenCast:YES];
+        _screenTrack = [factory videoTrackWithSource:_screenSource trackId:[@"screen-" stringByAppendingString:sessionId]];
+        CERTCRtpEncodingParameters *encoding = [[CERTC(@"RtpEncodingParameters") alloc] init];
+        encoding.maxBitrateBps = @2500000;
+        encoding.maxFramerate = @30;
+        CERTCRtpTransceiverInit *sendOnly = [[CERTC(@"RtpTransceiverInit") alloc] init];
+        sendOnly.direction = CERTCRtpTransceiverDirectionSendOnly;
+        sendOnly.streamIds = @[ [@"screen-" stringByAppendingString:sessionId] ];
+        sendOnly.sendEncodings = @[ encoding ];
+        [_pc addTransceiverWithTrack:_screenTrack init:sendOnly];
+        CEFramesSetSink(_screenSource);
     }
     return self;
 }
@@ -140,7 +157,7 @@ static NSString *connectionState(NSInteger s) {
 - (void)stats:(CEDone)done {
     [self.pc statisticsWithCompletionHandler:^(CERTCStatisticsReport *report) {
         NSMutableArray *out = [NSMutableArray new];
-        NSSet *wanted = [NSSet setWithArray:@[ @"inbound-rtp", @"codec", @"transport", @"candidate-pair" ]];
+        NSSet *wanted = [NSSet setWithArray:@[ @"inbound-rtp", @"outbound-rtp", @"remote-inbound-rtp", @"media-source", @"codec", @"transport", @"candidate-pair" ]];
         for (CERTCStatistics *stat in report.statistics.allValues) {
             if (![wanted containsObject:stat.type]) continue;
             NSMutableDictionary *values = [stat.values mutableCopy];
@@ -196,6 +213,7 @@ static NSString *connectionState(NSInteger s) {
 }
 
 - (void)close {
+    if (self.screenSource) CEFramesClearSink(self.screenSource);
     for (NSString *streamId in self.streamIds) CEVideoDetach(streamId);
     [self.streamIds removeAllObjects];
     [self.pc close];

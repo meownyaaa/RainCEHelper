@@ -1,5 +1,6 @@
 // the parts of WebRTC's ObjC SDK used here. Discord links it into its binary with a Discord prefix and stripped
 // symbols, so classes are looked up by name at runtime and only declared, never linked
+#import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 
 typedef NS_ENUM(NSInteger, CERTCSdpType) { CERTCSdpTypeOffer = 0, CERTCSdpTypePrAnswer = 1, CERTCSdpTypeAnswer = 2 };
@@ -58,8 +59,31 @@ typedef NS_ENUM(NSInteger, CERTCIceGatheringState) { CERTCIceGatheringStateNew =
 @property(nonatomic, readonly) CERTCMediaStreamTrack *track;
 @end
 
+@interface CERTCRtpEncodingParameters : NSObject
+@property(nonatomic, copy) NSNumber *maxBitrateBps;
+@property(nonatomic, copy) NSNumber *maxFramerate;
+@end
+
 @interface CERTCRtpTransceiverInit : NSObject
 @property(nonatomic, assign) CERTCRtpTransceiverDirection direction;
+@property(nonatomic, copy) NSArray<NSString *> *streamIds;
+@property(nonatomic, copy) NSArray<CERTCRtpEncodingParameters *> *sendEncodings;
+@end
+
+@interface CERTCCVPixelBuffer : NSObject
+- (instancetype)initWithPixelBuffer:(CVPixelBufferRef)pixelBuffer;
+@end
+
+@interface CERTCVideoFrame : NSObject
+- (instancetype)initWithBuffer:(id)buffer rotation:(NSInteger)rotation timeStampNs:(int64_t)timeStampNs;
+@end
+
+@interface CERTCVideoCapturer : NSObject
+- (instancetype)initWithDelegate:(id)delegate;
+@end
+
+@interface CERTCVideoSource : CERTCMediaSource
+- (void)capturer:(CERTCVideoCapturer *)capturer didCaptureVideoFrame:(CERTCVideoFrame *)frame;
 @end
 
 @interface CERTCRtpTransceiver : NSObject
@@ -93,6 +117,8 @@ typedef NS_ENUM(NSInteger, CERTCIceGatheringState) { CERTCIceGatheringStateNew =
 @interface CERTCPeerConnectionFactory : NSObject
 - (CERTCAudioSource *)audioSourceWithConstraints:(CERTCMediaConstraints *)constraints;
 - (CERTCAudioTrack *)audioTrackWithSource:(CERTCAudioSource *)source trackId:(NSString *)trackId;
+- (CERTCVideoSource *)videoSourceForScreenCast:(BOOL)forScreenCast;
+- (CERTCVideoTrack *)videoTrackWithSource:(CERTCVideoSource *)source trackId:(NSString *)trackId;
 - (CERTCPeerConnection *)peerConnectionWithConfiguration:(CERTCConfiguration *)configuration
                                              constraints:(CERTCMediaConstraints *)constraints
                                                 delegate:(id)delegate;
